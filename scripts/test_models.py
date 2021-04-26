@@ -14,7 +14,7 @@ from ops import ConsensusModule
 # options
 parser = argparse.ArgumentParser(
     description="Standard video-level testing")
-parser.add_argument('dataset', type=str, choices=['ucf101', 'hmdb51', 'kinetics'])
+parser.add_argument('dataset', type=str, choices=['ucf101', 'hmdb51', 'kinetics', 'streetdance245'])
 parser.add_argument('modality', type=str, choices=['RGB', 'Flow', 'RGBDiff'])
 parser.add_argument('test_list', type=str)
 parser.add_argument('weights', type=str)
@@ -22,7 +22,7 @@ parser.add_argument('--arch', type=str, default="resnet101")
 parser.add_argument('--save_scores', type=str, default=None)
 parser.add_argument('--test_segments', type=int, default=25)
 parser.add_argument('--max_num', type=int, default=-1)
-parser.add_argument('--test_crops', type=int, default=10)
+parser.add_argument('--test_crops', type=int, default=1)
 parser.add_argument('--input_size', type=int, default=224)
 parser.add_argument('--crop_fusion_type', type=str, default='avg',
                     choices=['avg', 'max', 'topk'])
@@ -42,6 +42,8 @@ elif args.dataset == 'hmdb51':
     num_class = 51
 elif args.dataset == 'kinetics':
     num_class = 400
+elif args.dataset == 'streetdance245':
+    num_class = 245
 else:
     raise ValueError('Unknown dataset '+args.dataset)
 
@@ -72,7 +74,7 @@ data_loader = torch.utils.data.DataLoader(
         TSNDataSet("", args.test_list, num_segments=args.test_segments,
                    new_length=1 if args.modality == "RGB" else 5,
                    modality=args.modality,
-                   image_tmpl="img_{:05d}.jpg" if args.modality in ['RGB', 'RGBDiff'] else args.flow_prefix+"{}_{:05d}.jpg",
+                   image_tmpl="{:d}.jpg" if args.modality in ['RGB', 'RGBDiff'] else args.flow_prefix+"{}_{:05d}.jpg",
                    test_mode=True,
                    transform=torchvision.transforms.Compose([
                        cropping,
@@ -122,9 +124,30 @@ def eval_video(video_data):
 proc_start_time = time.time()
 max_num = args.max_num if args.max_num > 0 else len(data_loader.dataset)
 
+
+def accuracy(output, target, topk=(1,)):
+    """Computes the precision@k for the specified values of k"""
+    maxk = max(topk)
+    batch_size = target.size(0)
+
+    _, pred = output.topk(maxk, 1, True, True)
+    pred = pred.t()
+    correct = pred.eq(target.view(1, -1).expand_as(pred))
+
+    res = []
+    for k in topk:
+        correct_k = correct[:k].view(-1).float().sum(0)
+        res.append(correct_k.mul_(100.0 / batch_size))
+    return res
+
 for i, (data, label) in data_gen:
     if i >= max_num:
         break
+
+    # print(i)
+    # print(data.shape)
+    # import pdb
+    # pdb.set_trace()
     rst = eval_video((i, data, label))
     output.append(rst[1:])
     cnt_time = time.time() - proc_start_time
@@ -132,21 +155,34 @@ for i, (data, label) in data_gen:
                                                                     total_num,
                                                                     float(cnt_time) / (i+1)))
 
-video_pred = [np.argmax(np.mean(x[0], axis=0)) for x in output]
+# video_pred = [np.argmax(np.mean(x[0], axis=0)) for x in output]
+
+video_pred = [np.mean(x[0], axis=0) for x in output]
 
 video_labels = [x[1] for x in output]
 
+video_pred = torch.Tensor(video_pred)
+video_pred = video_pred.squeeze(dim=1)
+video_labels = torch.Tensor(video_labels)
 
-cf = confusion_matrix(video_labels, video_pred).astype(float)
+# cf = confusion_matrix(video_labels, video_pred).astype(float)
 
-cls_cnt = cf.sum(axis=1)
-cls_hit = np.diag(cf)
+# cls_cnt = cf.sum(axis=1)
+# cls_hit = np.diag(cf)
 
-cls_acc = cls_hit / cls_cnt
+# cls_acc = cls_hit.sum() / cls_cnt.sum()
 
-print(cls_acc)
+# print('video_pred: ', video_pred.shape)
+# print('video_labels: ', video_labels.shape)
 
-print('Accuracy {:.02f}%'.format(np.mean(cls_acc) * 100))
+# import pdb
+# pdb.set_trace()
+
+prec1, prec5 = accuracy(video_pred, video_labels, topk=(1,5))
+
+print('Top 1: {}, Top 5: {}'.format(prec1, prec5))
+
+# print('Accuracy {:.02f}%'.format(np.mean(cls_acc) * 100))
 
 if args.save_scores is not None:
 

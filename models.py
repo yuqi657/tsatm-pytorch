@@ -38,7 +38,7 @@ TSN Configurations:
 
         self._prepare_base_model(base_model)
 
-        feature_dim = self._prepare_tsn(num_class)
+        self.feature_dim = self._prepare_tsn(num_class)
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -79,7 +79,9 @@ TSN Configurations:
     def _prepare_base_model(self, base_model):
 
         if 'resnet' in base_model or 'vgg' in base_model:
-            self.base_model = getattr(torchvision.models, base_model)(True)
+            # self.base_model = getattr(torchvision.models, base_model)(True)
+            import model_zoo
+            self.base_model = getattr(model_zoo, base_model)(True)
             self.base_model.last_layer_name = 'fc'
             self.input_size = 224
             self.input_mean = [0.485, 0.456, 0.406]
@@ -193,28 +195,44 @@ TSN Configurations:
         if self.modality == 'RGBDiff':
             sample_len = 3 * self.new_length
             input = self._get_diff(input)
-
+        # input parameters' shape of base_model here is (batch_size, n_seg*samle_len, h, w)
+        # and we reshape it to (bs*n_seg, sample_len, h, w)
+        # print('input shape:', input.shape)
         base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
-
+        # TODO: extract features of the last conv
+        # extract here
+        frame_feature = self.base_model.frame_feature
+        self.frame_feature = frame_feature.view((-1, self.num_segments) + frame_feature.size()[1:])
+        # Shape of self.frame_feature here is [batch_size, N_seg, fc_input, 7, 7]
+        # fc_input is 2048
+        # print('frame_feature grad_fn: ', frame_feature.grad_fn)
+        # print('self frame_feature grad_fn: ', self.frame_feature.grad_fn)
+        # print('resnet fc layer: ', base_out.shape)
+        # Shape of base out here is [batch_size*N_seg, fc_input]
         if self.dropout > 0:
             base_out = self.new_fc(base_out)
 
         if not self.before_softmax:
             base_out = self.softmax(base_out)
+        # print(base_out)
         if self.reshape:
             base_out = base_out.view((-1, self.num_segments) + base_out.size()[1:])
-
+        
+        # consensus on dim 1
         output = self.consensus(base_out)
         return output.squeeze(1)
 
     def _get_diff(self, input, keep_rgb=False):
+        # print('Input diff: ', input.shape)
         input_c = 3 if self.modality in ["RGB", "RGBDiff"] else 2
         input_view = input.view((-1, self.num_segments, self.new_length + 1, input_c,) + input.size()[2:])
         if keep_rgb:
             new_data = input_view.clone()
         else:
             new_data = input_view[:, :, 1:, :, :, :].clone()
-
+        # print('input view shape: ', input_view.shape)
+        # print('New data shape: ', new_data.shape)
+        # new_data shape here is [bz, N_seg, 6, 3, H, W]
         for x in reversed(list(range(1, self.new_length + 1))):
             if keep_rgb:
                 new_data[:, :, x, :, :, :] = input_view[:, :, x, :, :, :] - input_view[:, :, x - 1, :, :, :]

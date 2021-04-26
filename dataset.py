@@ -105,6 +105,7 @@ class TSNDataSet(data.Dataset):
             p = int(seg_ind)
             for i in range(self.new_length):
                 seg_imgs = self._load_image(record.path, p)
+                # print('list len {} and list[0] is {}'.format(len(seg_imgs), seg_imgs[0]))
                 images.extend(seg_imgs)
                 if p < record.num_frames:
                     p += 1
