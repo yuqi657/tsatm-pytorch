@@ -8,6 +8,6 @@
 ### 
 python main.py streetdance245 RGB '/data7/lyq/data/streetdance245/streetdance245_train_frame.txt' '/data7/lyq/data/streetdance245/streetdance245_val_frame.txt' \
    --arch resnet50 --num_segments 3 \
-   --gd 20 --lr 0.001 --lr_steps 30 60 --epochs 80 \
-   -b 16 -j 8 --dropout 0.8 \
+   --gd 20 --lr 0.001 --lr_steps 25 65 --epochs 80 \
+   -b 1 -j 8 --dropout 0.8 \
    --snapshot_pref streetdance245_bninception_

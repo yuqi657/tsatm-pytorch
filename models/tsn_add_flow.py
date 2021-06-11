@@ -1,4 +1,6 @@
+from numpy.lib.arraypad import pad
 from torch import nn
+import torch.nn.functional as F
 
 from ops.basic_ops import ConsensusModule, Identity
 from transforms import *
@@ -25,7 +27,6 @@ class TSN(nn.Module):
             self.new_length = 1 if modality == "RGB" else 5
         else:
             self.new_length = new_length
-
         print(("""
 Initializing TSN with base model: {}.
 TSN Configurations:
@@ -38,7 +39,7 @@ TSN Configurations:
 
         self._prepare_base_model(base_model)
 
-        self.feature_dim = self._prepare_tsn(num_class)
+        feature_dim = self._prepare_tsn(num_class)
 
         if self.modality == 'Flow':
             print("Converting the ImageNet model to a flow init model")
@@ -57,6 +58,20 @@ TSN Configurations:
         self._enable_pbn = partial_bn
         if partial_bn:
             self.partialBN(True)
+
+        # TODO: add structure here
+        extract_feature = 2048
+        planes = 512
+        self.reduce_conv1 = nn.Conv2d(extract_feature, planes, kernel_size=1, bias=False)
+        self.bn2d = nn.BatchNorm2d(planes)
+
+        self.relu = nn.ReLU(inplace=True)
+        self.bn3d = nn.BatchNorm3d(planes)
+        self.conv3d_spatial = nn.Conv3d(planes, planes, kernel_size=(1,3,3))
+        self.conv3d_temporal = nn.Conv3d(planes, planes, kernel_size=(3,1,1))
+        self.avgpool = nn.AdaptiveAvgPool3d((1,1,1))
+        self.drop = nn.Dropout3d(dropout)
+        self.fc_at = nn.Linear(planes, num_class)
 
     def _prepare_tsn(self, num_class):
         feature_dim = getattr(self.base_model, self.base_model.last_layer_name).in_features
@@ -144,6 +159,9 @@ TSN Configurations:
         normal_weight = []
         normal_bias = []
         bn = []
+        new_3d_weight = []
+        new_3d_bias = []
+        new_3d_bn = []
 
         conv_cnt = 0
         bn_cnt = 0
@@ -172,6 +190,13 @@ TSN Configurations:
                 # later BN's are frozen
                 if not self._enable_pbn or bn_cnt == 1:
                     bn.extend(list(m.parameters()))
+            elif isinstance(m, torch.nn.Conv3d):
+                ps = list(m.parameters())
+                new_3d_weight.append(ps[0])
+                if len(ps) == 2:
+                    new_3d_bias.append(ps[1])
+            elif isinstance(m, torch.nn.BatchNorm3d):
+                new_3d_bn.extend(list(m.parameters()))
             elif len(m._modules) == 0:
                 if len(list(m.parameters())) > 0:
                     raise ValueError("New atomic module type: {}. Need to give it a learning policy".format(type(m)))
@@ -187,6 +212,12 @@ TSN Configurations:
              'name': "normal_bias"},
             {'params': bn, 'lr_mult': 1, 'decay_mult': 0,
              'name': "BN scale/shift"},
+            {'params': new_3d_weight, 'lr_mult': 10, 'decay_mult': 1,
+             'name': "new_3d_weight"},
+            {'params': new_3d_bias, 'lr_mult': 10, 'decay_mult': 1,
+             'name': "new_3d_bias"},
+            {'params': new_3d_bn, 'lr_mult': 10, 'decay_mult': 1,
+             'name': "new_3d_bn"},
         ]
 
     def forward(self, input):
@@ -199,16 +230,41 @@ TSN Configurations:
         # and we reshape it to (bs*n_seg, sample_len, h, w)
         # print('input shape:', input.shape)
         base_out = self.base_model(input.view((-1, sample_len) + input.size()[-2:]))
-        # TODO: extract features of the last conv
-        # extract here
-        frame_feature = self.base_model.frame_feature
-        self.frame_feature = frame_feature.view((-1, self.num_segments) + frame_feature.size()[1:])
-        # Shape of self.frame_feature here is [batch_size, N_seg, fc_input, 7, 7]
-        # fc_input is 2048
-        # print('frame_feature grad_fn: ', frame_feature.grad_fn)
-        # print('self frame_feature grad_fn: ', self.frame_feature.grad_fn)
-        # print('resnet fc layer: ', base_out.shape)
-        # Shape of base out here is [batch_size*N_seg, fc_input]
+
+        # print('frame_feature grad fn: ', self.base_model.frame_feature.grad_fn, self.base_model.frame_feature.shape)
+        # frame feature shape here is (batch_size * n_seg, 2048, 7, 7)
+        # parrallel
+        # add motion
+        at_out_motion = self.reduce_conv1(self.base_model.frame_feature)    # reduce channel
+        at_out_motion = at_out_motion.view((-1, self.num_segments) + at_out_motion.size()[1:])    # at_out_motion shape here is (batch_size, temporal, channel, 7, 7)
+        at_out_motion_left, _ = at_out_motion.split([self.num_segments-1, 1], dim=1)
+        _, at_out_motion_right = at_out_motion.split([1, self.num_segments-1], dim=1)
+        at_out_motion = F.pad(at_out_motion_right-at_out_motion_left, (0,0, 0,0, 0,0, 0,1), "constant", 0).transpose(1,2)    # at_out_motion shape here is (batch_size, channel, temporal, 7, 7)
+
+        at_out_motion = self.bn3d(at_out_motion)
+        at_out_motion = self.relu(at_out_motion)
+        at_out_motion = self.avgpool(at_out_motion)
+        at_out_motion = torch.flatten(at_out_motion, 1)
+        at_out_motion = self.drop(at_out_motion)
+        at_out_motion = self.fc_at(at_out_motion)
+
+
+        # add spatial-temporal
+        at_out = self.reduce_conv1(self.base_model.frame_feature)    # reduce channel
+        at_out = self.bn2d(at_out)
+        at_out = self.relu(at_out)
+
+        at_out = at_out.view((-1, self.num_segments) + at_out.size()[1:]).transpose(1,2)
+        at_out = self.conv3d_spatial(at_out)
+        at_out = self.conv3d_temporal(at_out)
+        at_out = self.bn3d(at_out)
+        at_out = self.relu(at_out)
+
+        at_out = self.avgpool(at_out)
+        at_out = torch.flatten(at_out, 1)
+        at_out = self.drop(at_out)
+        at_out = self.fc_at(at_out)
+
         if self.dropout > 0:
             base_out = self.new_fc(base_out)
 
@@ -220,7 +276,7 @@ TSN Configurations:
         
         # consensus on dim 1
         output = self.consensus(base_out)
-        return output.squeeze(1)
+        return 0.9 * output.squeeze(1) + 0.1 * at_out_motion + 0.3 * at_out
 
     def _get_diff(self, input, keep_rgb=False):
         # print('Input diff: ', input.shape)

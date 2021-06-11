@@ -10,8 +10,7 @@ import torch.optim
 from torch.nn.utils import clip_grad_norm
 
 from dataset import TSNDataSet
-from models import TSN
-from model_zoo.alm import ALM
+from models.tsn_add_flow import TSN
 from transforms import *
 from opts import parser
 
@@ -24,7 +23,7 @@ def set_break():
 def pre_process():
     import warnings
     warnings.filterwarnings('ignore')
-    os.environ["CUDA_VISIBLE_DEVICES"] = "0, 1"
+    os.environ["CUDA_VISIBLE_DEVICES"] = "1"
 
 def main():
     # do some pre_process, such as ignore warning
@@ -55,10 +54,18 @@ def main():
     policies = model.get_optim_policies()
     train_augmentation = model.get_augmentation()
 
+
     model = torch.nn.DataParallel(model, device_ids=args.gpus).cuda()
-    # input of model is (batch_size, n_seg*c, h, w)
+    # calculate flops
+    from ptflops import get_model_complexity_info
+    macs, params = get_model_complexity_info(model, (1, 9, 224, 224), as_strings=True,
+                                           print_per_layer_stat=True, verbose=True)
+    print('{:<30}  {:<8}'.format('Computational complexity: ', macs))
+    print('{:<30}  {:<8}'.format('Number of parameters: ', params))
+    set_break()
+    # # input of model is (batch_size, n_seg*c, h, w)
     # from torchsummary import summary
-    # summary(model, input_size=(4, 9, 224, 224))
+    # summary(model, input_size=(1, 9, 224, 224))
     # set_break()
     # print('Parallel module features: ', model.module._modules.keys())
     # print('Parallel layer4 :2: ', model.module.base_model.layer4[:2])
@@ -69,11 +76,11 @@ def main():
     # with open('new_model.txt', 'w') as f:
     #     f.write(str(model))
     #     f.write(str(model.module.base_model._modules.keys()))
+    # for m in model.module.modules():
+    #     if isinstance(m, torch.nn.Conv3d):
+    #         print(m)
     # set_break()
     # Additional long-range Module
-    fc_input = 2048
-    model3d = ALM(num_class, args.num_segments, fc_input)
-    model3d = torch.nn.DataParallel(model3d, device_ids=args.gpus).cuda()
     # input size here is (batch_size, N_seg, fc_input, 7, 7), fc_input here is 2048
     # from torchsummary import summary
     # summary(model3d, input_size=(4, 3, 2048, 7, 7))
@@ -158,11 +165,11 @@ def main():
         adjust_learning_rate(optimizer, epoch, args.lr_steps)
 
         # train for one epoch
-        train(train_loader, model, criterion, optimizer, epoch, model3d)
+        train(train_loader, model, criterion, optimizer, epoch)
         # set_break()
         # evaluate on validation set
         if (epoch + 1) % args.eval_freq == 0 or epoch == args.epochs - 1:
-            prec1 = validate(val_loader, model, criterion, (epoch + 1) * len(train_loader), model3d)
+            prec1 = validate(val_loader, model, criterion, (epoch + 1) * len(train_loader))
 
             # remember best prec@1 and save checkpoint
             is_best = prec1 > best_prec1
@@ -173,9 +180,11 @@ def main():
                 'state_dict': model.state_dict(),
                 'best_prec1': best_prec1,
             }, is_best)
+    
+    print('best_prec1:', best_prec1)
 
 
-def train(train_loader, model, criterion, optimizer, epoch, model3d):
+def train(train_loader, model, criterion, optimizer, epoch):
     batch_time = AverageMeter()
     data_time = AverageMeter()
     losses = AverageMeter()
@@ -189,7 +198,6 @@ def train(train_loader, model, criterion, optimizer, epoch, model3d):
 
     # switch to train mode
     model.train()
-    model3d.train()
 
     end = time.time()
 
@@ -205,16 +213,8 @@ def train(train_loader, model, criterion, optimizer, epoch, model3d):
         # Input size here is (batch_size, n_seg*c, h, w), but it changes to (bs*N_seg, sample_len, H, W) in the model
         # compute output
         output = model(input_var)
-        # print('Input grad after input', input_var.grad_fn, input_var.requires_grad)
-        # TODO: my change begin here
-        # feature shape here is (batch_size, N_seg, fc_input, 7, 7)
-        frame_feature = model.module.frame_feature
-        # print('frame feature: ', frame_feature.shape)
-        # print('main frame feature grad: ', frame_feature.grad_fn, frame_feature.requires_grad)
-        output3d = model3d(frame_feature)
-        alpha = 0.5
-        
-        loss = criterion(output, target_var) + alpha * criterion(output3d, target_var)
+
+        loss = criterion(output, target_var)
 
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1,5))
@@ -250,7 +250,7 @@ def train(train_loader, model, criterion, optimizer, epoch, model3d):
                    data_time=data_time, loss=losses, top1=top1, top5=top5, lr=optimizer.param_groups[-1]['lr'])))
 
 
-def validate(val_loader, model, criterion, iter, model3d, logger=None):
+def validate(val_loader, model, criterion, iter, logger=None):
     batch_time = AverageMeter()
     losses = AverageMeter()
     top1 = AverageMeter()
@@ -258,7 +258,6 @@ def validate(val_loader, model, criterion, iter, model3d, logger=None):
 
     # switch to evaluate mode
     model.eval()
-    model3d.eval()
 
     end = time.time()
     for i, (input, target) in enumerate(val_loader):
@@ -268,11 +267,8 @@ def validate(val_loader, model, criterion, iter, model3d, logger=None):
 
         # compute output
         output = model(input_var)
-        frame_feature = model.module.frame_feature
-        output3d = model3d(frame_feature)
-        alpha = 0.5
-        loss = criterion(output, target_var) + alpha * criterion(output3d, target_var)
-
+      
+        loss = criterion(output, target_var)
         # measure accuracy and record loss
         prec1, prec5 = accuracy(output.data, target, topk=(1,5))
 

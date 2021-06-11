@@ -1,7 +1,7 @@
 '''
 Author: yuqi
 Date: 2021-04-26 10:12:54
-LastEditTime: 2021-04-26 16:04:15
+LastEditTime: 2021-04-26 17:55:17
 LastEditors: Please set LastEditors
 Description: In User Settings Edit
 FilePath: /tsn-pytorch/model_zoo/alm.py
@@ -44,6 +44,7 @@ class ALM(nn.Module):
         self.avgpool = nn.AdaptiveAvgPool3d((1,1,1))
         self.drop = nn.Dropout3d(dropout)
         self.fc = nn.Linear(planes, num_classes)
+        self.softmax = nn.Softmax(dim=1)
 
     def forward(self, input):
         # input size here is (batch_size, N_seg, fc_input, 7, 7), fc_input here is 2048
@@ -71,4 +72,5 @@ class ALM(nn.Module):
         output = self.drop(output)
         output = self.fc(output)
         # print('3d output: ', output.shape)
+        # output = self.softmax(output)
         return output

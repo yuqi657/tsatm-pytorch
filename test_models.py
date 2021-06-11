@@ -11,6 +11,31 @@ from models import TSN
 from transforms import *
 from ops import ConsensusModule
 
+import os
+os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+
+def set_break():
+    import pdb 
+    pdb.set_trace()
+
+class AverageMeter(object):
+    """Computes and stores the average and current value"""
+    def __init__(self):
+        self.reset()
+
+    def reset(self):
+        
+        self.val = 0
+        self.avg = 0
+        self.sum = 0
+        self.count = 0
+
+    def update(self, val, n=1):
+        self.val = val
+        self.sum += val * n
+        self.count += n
+        self.avg = self.sum / self.count
+
 # options
 parser = argparse.ArgumentParser(
     description="Standard video-level testing")
@@ -47,7 +72,7 @@ elif args.dataset == 'streetdance245':
 else:
     raise ValueError('Unknown dataset '+args.dataset)
 
-net = TSN(num_class, 1, args.modality,
+net = TSN(num_class, args.test_segments, args.modality,
           base_model=args.arch,
           consensus_type=args.crop_fusion_type,
           dropout=args.dropout)
@@ -56,6 +81,8 @@ checkpoint = torch.load(args.weights)
 print("model epoch {} best prec@1: {}".format(checkpoint['epoch'], checkpoint['best_prec1']))
 
 base_dict = {'.'.join(k.split('.')[1:]): v for k,v in list(checkpoint['state_dict'].items())}
+# print(base_dict)
+# set_break()
 net.load_state_dict(base_dict)
 
 if args.test_crops == 1:
@@ -82,7 +109,7 @@ data_loader = torch.utils.data.DataLoader(
                        ToTorchFormatTensor(div=args.arch != 'BNInception'),
                        GroupNormalize(net.input_mean, net.input_std),
                    ])),
-        batch_size=1, shuffle=False,
+        batch_size=4, shuffle=False,
         num_workers=args.workers * 2, pin_memory=True)
 
 if args.gpus is not None:
@@ -102,6 +129,7 @@ output = []
 
 def eval_video(video_data):
     i, data, label = video_data
+    # print('label size: ', label.shape)
     num_crop = args.test_crops
 
     if args.modality == 'RGB':
@@ -115,10 +143,15 @@ def eval_video(video_data):
 
     input_var = torch.autograd.Variable(data.view(-1, length, data.size(2), data.size(3)),
                                         volatile=True)
-    rst = net(input_var).data.cpu().numpy().copy()
-    return i, rst.reshape((num_crop, args.test_segments, num_class)).mean(axis=0).reshape(
-        (args.test_segments, 1, num_class)
-    ), label[0]
+    # rst = net(input_var).data.cpu().numpy().copy()
+    rst = net(input_var)
+    # rst shape here is (batch_size, label)
+    # print('rst.shape: ', rst.shape)
+    # set_break()
+    # return i, rst.reshape((num_crop, args.test_segments, num_class)).mean(axis=0).reshape(
+    #     (args.test_segments, 1, num_class)
+    # ), label[0]
+    return i, rst, label
 
 
 proc_start_time = time.time()
@@ -140,30 +173,55 @@ def accuracy(output, target, topk=(1,)):
         res.append(correct_k.mul_(100.0 / batch_size))
     return res
 
-for i, (data, label) in data_gen:
-    if i >= max_num:
-        break
 
-    # print(i)
-    # print(data.shape)
-    # import pdb
-    # pdb.set_trace()
-    rst = eval_video((i, data, label))
-    output.append(rst[1:])
-    cnt_time = time.time() - proc_start_time
-    print('video {} done, total {}/{}, average {} sec/video'.format(i, i+1,
-                                                                    total_num,
-                                                                    float(cnt_time) / (i+1)))
+def validate_video():
+    batch_time = AverageMeter()
+    losses = AverageMeter()
+    top1 = AverageMeter()
+    top5 = AverageMeter()
+    
+    avg_prec1 = 0.0
+    avg_prec5 = 0.0
+    cnt = 0
 
+    for i, (data, label) in data_gen:
+        if i >= max_num:
+            break
+        label = label.cuda()
+        output = net(data) 
+        prec1, prec5 = accuracy(output.data, label, topk=(1,5))
+        print('Top 1: {}, Top 5: {}'.format(prec1, prec5))
+
+        top1.update(prec1.item(), data.size(0))
+        top5.update(prec5.item(), data.size(0))
+        
+        cnt += 1
+        avg_prec1 += prec1.item()
+        avg_prec5 += prec5.item()
+        # print(i)
+        # print(data.shape)
+        # import pdb
+        # pdb.set_trace()
+        # rst = eval_video((i, data, label))
+
+        # output.append(rst[1:])
+        # cnt_time = time.time() - proc_start_time
+        # print('video {} done, total {}/{}, average {} sec/video'.format(i, i+1,
+        #                                                                 total_num,
+        #                                                                 float(cnt_time) / (i+1)))
+    print('Average Top 1: {}, Average Top 5: {}'.format(avg_prec1 / cnt, avg_prec5 / cnt))
+
+
+validate_video()
 # video_pred = [np.argmax(np.mean(x[0], axis=0)) for x in output]
 
-video_pred = [np.mean(x[0], axis=0) for x in output]
+# video_pred = [np.mean(x[0], axis=0) for x in output]
 
-video_labels = [x[1] for x in output]
+# video_labels = [x[1] for x in output]
 
-video_pred = torch.Tensor(video_pred)
-video_pred = video_pred.squeeze(dim=1)
-video_labels = torch.Tensor(video_labels)
+# video_pred = torch.Tensor(video_pred)
+# video_pred = video_pred.squeeze(dim=1)
+# video_labels = torch.Tensor(video_labels)
 
 # cf = confusion_matrix(video_labels, video_pred).astype(float)
 
@@ -178,9 +236,6 @@ video_labels = torch.Tensor(video_labels)
 # import pdb
 # pdb.set_trace()
 
-prec1, prec5 = accuracy(video_pred, video_labels, topk=(1,5))
-
-print('Top 1: {}, Top 5: {}'.format(prec1, prec5))
 
 # print('Accuracy {:.02f}%'.format(np.mean(cls_acc) * 100))
 

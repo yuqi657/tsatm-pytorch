@@ -205,8 +205,7 @@ class ResNet(nn.Module):
         x = self.layer3(x)
         x = self.layer4(x)
 
-        self.frame_feature = x.detach().clone()
-        # self.frame_feature = x
+        self.frame_feature = x
 
         x = self.avgpool(x)
         x = torch.flatten(x, 1)
